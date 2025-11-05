@@ -1,9 +1,21 @@
 using CarvedRockFitness.Components;
 using CarvedRockFitness.Services;
 using CarvedRockFitness.Repositories;
+using CarvedRockFitness.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.AzureAppServices;
+using Azure.Identity;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Add Azure Key Vault configuration (only for non-development environments)
+if (!builder.Environment.IsDevelopment())
+{
+    var keyVaultUrl = "https://pertan4711-carvedrock-kv.vault.azure.net/";
+    builder.Configuration.AddAzureKeyVault(
+        new Uri(keyVaultUrl),
+        new DefaultAzureCredential());
+}
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
@@ -21,21 +33,64 @@ builder.Services.AddSession(options =>
 
 builder.Logging.AddAzureWebAppDiagnostics();
 
-// Register ICartRepository based on connection string, or use in-memory cart
-string connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? Environment.GetEnvironmentVariable("DefaultConnection");
+// Add Entity Framework DbContext
+string connectionString = "";
+
+if (builder.Environment.IsDevelopment())
+{
+    // Use LocalDB for development
+    connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? "";
+}
+else
+{
+    // Build connection string from Key Vault secrets for production
+    var server = builder.Configuration["DatabaseServer"];
+    var database = builder.Configuration["DatabaseName"];
+    var username = builder.Configuration["DatabaseUsername"];
+    var password = builder.Configuration["DatabasePassword"];
+    
+    if (!string.IsNullOrEmpty(server) && !string.IsNullOrEmpty(database) && 
+        !string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+    {
+        connectionString = $"Server={server};Database={database};User Id={username};Password={password};Encrypt=true;TrustServerCertificate=false;Connection Timeout=30;";
+    }
+}
+
 if (!string.IsNullOrEmpty(connectionString))
 {
-    builder.Services.AddScoped<ICartRepository, SqlCartRepository>();
+    builder.Services.AddDbContextFactory<ApplicationDbContext>(options =>
+    {
+        if (builder.Environment.IsDevelopment())
+        {
+            // Use SQL Server LocalDB for development
+            options.UseSqlServer(connectionString, sqlOptions =>
+            {
+                sqlOptions.EnableRetryOnFailure();
+            });
+        }
+        else
+        {
+            // Use Azure SQL Database for production
+            options.UseSqlServer(connectionString, sqlOptions =>
+            {
+                sqlOptions.EnableRetryOnFailure(
+                    maxRetryCount: 5,
+                    maxRetryDelay: TimeSpan.FromSeconds(30),
+                    errorNumbersToAdd: null);
+            });
+        }
+    });
+    builder.Services.AddScoped<ICartRepository, EFSqlCartRepository>();
+    builder.Services.AddScoped<IProductRepository, EFProductRepository>();
 }
 else
 {
     builder.Services.AddScoped<ICartRepository, InMemoryCartRepository>();
+    builder.Services.AddScoped<IProductRepository, ProductRepository>();
 }
 
 builder.Services.AddScoped<ShoppingCartService>();
 builder.Services.AddSingleton<CartEventService>();
-
-builder.Services.AddScoped<IProductRepository, ProductRepository>();
 
 var app = builder.Build();
 
